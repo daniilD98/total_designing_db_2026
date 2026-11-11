@@ -2,8 +2,6 @@ DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'inspector') THEN
         CREATE ROLE inspector LOGIN PASSWORD 'NetoSQL2025';
-    ELSE
-        ALTER ROLE inspector LOGIN PASSWORD 'NetoSQL2025';
     END IF;
     EXECUTE format('GRANT CONNECT ON DATABASE %I TO inspector', current_database());
 END $$;
