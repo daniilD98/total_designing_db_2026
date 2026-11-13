@@ -256,39 +256,45 @@ BEGIN
     FOR i IN 0 .. 5 LOOP
         v_m := v_win + i * interval '1 month';
 
-        INSERT INTO courier_pay (year, month, courier_id, amount, coefficient_used)
-        SELECT extract(year  FROM v_m)::int,
-               extract(month FROM v_m)::int,
-               c.courier_id,
-               round(c.coefficient * coalesce(sum(o.commission), 0), 2),
-               c.coefficient
-        FROM courier c
-        LEFT JOIN "order" o
-               ON o.courier_id = c.courier_id
-              AND o.status = 'доставлен'
-              AND o.order_timestamp >= v_m
-              AND o.order_timestamp <  v_m + interval '1 month'
-        WHERE c.courier_id = ANY (v_cour)
-        GROUP BY c.courier_id, c.coefficient;
-
+        WITH stat AS (
+            SELECT c.courier_id,
+                   c.status,
+                   count(o.order_id) AS cnt,
+                   coalesce(sum(o.commission), 0) AS comm,
+                   coalesce(cp.coefficient_used, c.coefficient) AS coef
+              FROM courier c
+              LEFT JOIN "order" o
+                     ON o.courier_id = c.courier_id
+                    AND o.status = 'доставлен'
+                    AND o.order_timestamp >= v_m 
+                    AND o.order_timestamp < v_m + interval '1 month'
+              LEFT JOIN courier_pay cp
+                     ON cp.courier_id = c.courier_id 
+                    AND cp.year = extract(year from v_m)::int 
+                    AND cp.month = extract(month from v_m)::int
+             WHERE c.courier_id = ANY(v_cour)
+             GROUP BY c.courier_id, c.status, cp.coefficient_used, c.coefficient
+        ), upsert AS (
+            INSERT INTO courier_pay (year, month, courier_id, amount, coefficient_used)
+            SELECT extract(year from v_m)::int, 
+                   extract(month from v_m)::int, 
+                   s.courier_id, 
+                   round(s.coef * s.comm, 2), 
+                   s.coef
+              FROM stat s
+            ON CONFLICT (year, month, courier_id)
+            -- Обновляем ТОЛЬКО сумму, чтобы не перезаписать старый коэффициент
+            DO UPDATE SET amount = EXCLUDED.amount
+            RETURNING courier_id
+        )
         UPDATE courier c
            SET coefficient = CASE WHEN s.cnt <= 150 THEN 0.1
                                   WHEN s.cnt <= 250 THEN 0.2
                                   WHEN s.cnt <= 500 THEN 0.3
-                                  ELSE 0.5
-                             END
-          FROM (SELECT c2.courier_id, count(o.order_id) AS cnt
-                  FROM courier c2
-                  LEFT JOIN "order" o
-                         ON o.courier_id = c2.courier_id
-                        AND o.status = 'доставлен'
-                        AND o.order_timestamp >= v_m
-                        AND o.order_timestamp <  v_m + interval '1 month'
-                 WHERE c2.courier_id = ANY (v_cour)
-                 GROUP BY c2.courier_id) s
+                                  ELSE 0.5 END
+          FROM stat s
          WHERE s.courier_id = c.courier_id
-           AND (c.dismissal_date IS NULL
-                OR date_trunc('month', c.dismissal_date::timestamp) > v_m);
+           AND s.status <> 'уволен';
     END LOOP;
 END $$;
 
@@ -327,40 +333,40 @@ AS $$
 DECLARE
     v_start timestamp := date_trunc('month', localtimestamp);
     v_end   timestamp := date_trunc('month', localtimestamp) + interval '1 month';
-    v_year  int       := extract(year  FROM localtimestamp)::int;
-    v_month int       := extract(month FROM localtimestamp)::int;
+    v_y     int       := extract(year  FROM localtimestamp)::int;
+    v_m     int       := extract(month FROM localtimestamp)::int;
 BEGIN
-    INSERT INTO courier_pay (year, month, courier_id, amount, coefficient_used)
-    SELECT v_year,
-           v_month,
-           c.courier_id,
-           round(c.coefficient * coalesce(sum(o.commission), 0), 2),
-           c.coefficient
-    FROM courier c
-    LEFT JOIN "order" o
-           ON o.courier_id = c.courier_id
-          AND o.status = 'доставлен'
-          AND o.order_timestamp >= v_start
-          AND o.order_timestamp <  v_end
-    GROUP BY c.courier_id, c.coefficient
-    ON CONFLICT (year, month, courier_id)
-    DO UPDATE SET amount = EXCLUDED.amount,
-                  coefficient_used = EXCLUDED.coefficient_used;
-
+    WITH stat AS (
+        SELECT c.courier_id,
+               c.status,
+               count(o.order_id) AS cnt,
+               coalesce(sum(o.commission), 0) AS comm,
+               coalesce(cp.coefficient_used, c.coefficient) AS coef
+          FROM courier c
+          LEFT JOIN "order" o
+                 ON o.courier_id = c.courier_id
+                AND o.status = 'доставлен'
+                AND o.order_timestamp >= v_start 
+                AND o.order_timestamp < v_end
+          LEFT JOIN courier_pay cp
+                 ON cp.courier_id = c.courier_id 
+                AND cp.year = v_y 
+                AND cp.month = v_m
+         GROUP BY c.courier_id, c.status, cp.coefficient_used, c.coefficient
+    ), upsert AS (
+        INSERT INTO courier_pay (year, month, courier_id, amount, coefficient_used)
+        SELECT v_y, v_m, s.courier_id, round(s.coef * s.comm, 2), s.coef
+          FROM stat s
+        ON CONFLICT (year, month, courier_id)
+        DO UPDATE SET amount = EXCLUDED.amount
+        RETURNING courier_id
+    )
     UPDATE courier c
        SET coefficient = CASE WHEN s.cnt <= 150 THEN 0.1
                               WHEN s.cnt <= 250 THEN 0.2
                               WHEN s.cnt <= 500 THEN 0.3
-                              ELSE 0.5
-                         END
-      FROM (SELECT c2.courier_id, count(o.order_id) AS cnt
-              FROM courier c2
-              LEFT JOIN "order" o
-                     ON o.courier_id = c2.courier_id
-                    AND o.status = 'доставлен'
-                    AND o.order_timestamp >= v_start
-                    AND o.order_timestamp <  v_end
-             GROUP BY c2.courier_id) s
+                              ELSE 0.5 END
+      FROM stat s
      WHERE s.courier_id = c.courier_id
-       AND c.status <> 'уволен';
+       AND s.status <> 'уволен';
 END $$;
